@@ -62,6 +62,8 @@ export function Overview() {
   return (
     <>
       <section className="hero" aria-labelledby="hero-title">
+        <img className="hero-photo" src="./hero.jpg" srcSet="./hero-sm.jpg 1000w, ./hero.jpg 2000w" sizes="100vw"
+          alt="" aria-hidden="true" decoding="async" fetchPriority="high" />
         <div className="hero-inner">
           <div>
             <div className="eyebrow">{t("As of")} {year}{m.meta.partialYears.includes(year) ? ` · ${t("partial year")}` : ""}</div>
