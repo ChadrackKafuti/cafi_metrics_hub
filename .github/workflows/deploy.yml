@@ -1,0 +1,78 @@
+name: Publish dashboard
+
+# Rebuilds the dashboard and publishes it to GitHub Pages:
+#   * on every push to main (code, config or a new data/ProjectData.xlsx)
+#   * every day at 05:17 UTC, picking up the latest workbook from SharePoint
+#     when the SharePoint secrets are configured
+#   * on demand (Actions tab → Publish dashboard → Run workflow)
+# A blocking data-quality error stops the run, so a broken workbook is never published.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: Fetch latest workbook from SharePoint (if configured)
+        env:
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          SHAREPOINT_SITE: ${{ vars.SHAREPOINT_SITE }}
+          SHAREPOINT_FILE: ${{ vars.SHAREPOINT_FILE }}
+        run: python -m pipeline.fetch_sharepoint --out data/ProjectData.xlsx
+
+      - name: Test pipeline
+        run: python -m pytest -q
+
+      - name: Build and validate data
+        run: python -m pipeline.build
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - name: Build dashboard
+        working-directory: web
+        run: |
+          npm run typecheck
+          npm test
+          npx vite build
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

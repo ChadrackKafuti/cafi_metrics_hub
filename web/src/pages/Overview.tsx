@@ -1,0 +1,387 @@
+import { useMemo, useState } from "react";
+import { useApp } from "../lib/state";
+import { useFiltered } from "../lib/hooks";
+import { nameOf, t } from "../lib/i18n";
+import {
+  activeIn, AREA_INDICATORS, byKey, co2Aggregate, indicatorAggs, outcomeAchievement, sumUnit, valueAt,
+} from "../lib/model";
+import { compact, num, pct, signed, tco2, withUnit } from "../lib/format";
+import { outcomeHex, outcomeVar, textOn } from "../lib/colors";
+import { axisBase, esc, tipRow, tipTitle, tooltipBase } from "../lib/echarts";
+import { Chart } from "../components/Chart";
+import { AfricaMap, MapLegend, type MapDatum } from "../components/AfricaMap";
+import { Link } from "../components/Shell";
+import { ChartCard, CountUp, Meter, Sparkline, type Column } from "../components/ui";
+import type { DataRecord } from "../lib/types";
+
+type MapMetric = "ha" | "programmes" | "co2";
+
+export function Overview() {
+  const { m, ix, filters, setFilters, lang } = useApp();
+  const { records, yi, year, years } = useFiltered();
+  const [mapMetric, setMapMetric] = useState<MapMetric>("ha");
+
+  const aggs = useMemo(() => indicatorAggs(ix, records, yi), [ix, records, yi]);
+  const prevAggs = useMemo(() => indicatorAggs(ix, records, Math.max(0, yi - 1)), [ix, records, yi]);
+  const co2 = useMemo(() => co2Aggregate(records, yi), [records, yi]);
+  const hectares = sumUnit(aggs, "ha", AREA_INDICATORS);
+  const hectaresPrev = yi > 0 ? sumUnit(prevAggs, "ha", AREA_INDICATORS) : 0;
+  const progIds = new Set(records.map((r) => r.programme));
+  const active = [...progIds].filter((id) => activeIn(ix.programmes.get(id)!, year)).length;
+  const partners = new Set(records.map((r) => r.partner)).size;
+  const countries = new Set(records.map((r) => ix.countryOf(r))).size;
+  const anticipated = m.headline.anticipatedCo2.value;
+  const mega = co2.committed >= 1e6;
+  const filtered = filters.countries.length + filters.partners.length + filters.programmes.length > 0;
+
+  // Outcome summaries
+  const outcomes = m.outcomes.map((o) => {
+    const oa = aggs.filter((a) => a.indicator.outcome === o.id);
+    const recs = records.filter((r) => ix.outcomeOf(r) === o.id);
+    const trend = years.map((_, i) => outcomeAchievement(indicatorAggs(ix, recs, i)));
+    return { o, aggs: oa, achievement: outcomeAchievement(oa), trend, recs };
+  }).filter((x) => x.aggs.length);
+
+  // Map data per country
+  const mapData: MapDatum[] = m.countries.filter((c) => c.iso).map((c) => {
+    const rc = records.filter((r) => ix.countryOf(r) === c.id);
+    const ha = rc.filter((r) => AREA_INDICATORS.includes(r.indicator)).reduce((s, r) => s + (valueAt(r.values, yi) ?? 0), 0);
+    const progs = new Set(rc.map((r) => r.programme)).size;
+    const c2 = co2Aggregate(rc, yi).committed;
+    const value = mapMetric === "ha" ? ha : mapMetric === "programmes" ? progs : c2;
+    return {
+      iso: c.iso!, label: nameOf(c), value,
+      display: mapMetric === "ha" ? `${compact(ha)} ha` : mapMetric === "programmes" ? `${progs}` : tco2(c2),
+      extra: `${progs} ${t("programmes")}`,
+    };
+  }).filter((d) => d.value > 0 || mapMetric === "programmes");
+  const mapLabel = mapMetric === "ha" ? t("Hectares planted, restored or protected") : mapMetric === "programmes" ? t("Programmes reporting") : t("Committed (full cycle)");
+
+  const isoToCountry = new Map(m.countries.map((c) => [c.iso, c.id]));
+
+  return (
+    <>
+      <section className="hero" aria-labelledby="hero-title">
+        <div className="hero-inner">
+          <div>
+            <div className="eyebrow">{t("As of")} {year}{m.meta.partialYears.includes(year) ? ` · ${t("partial year")}` : ""}</div>
+            <h1 id="hero-title">{t("Results across Central Africa")}</h1>
+            <p className="lede">{t("Cumulative results reported by CAFI-funded programmes")}.</p>
+            <div className="hero-figure">
+              <div className="big">
+                <CountUp value={co2.committed / (mega ? 1e6 : 1e3)} format={(v) => num(v, 1)} /><small>{mega ? "Mt" : "kt"} CO₂e</small>
+              </div>
+              <div className="cap">{t("Emission reductions committed")}</div>
+              <div className="hero-meter">
+                <div className="track"><div className="fill" style={{ width: `${Math.min(100, (co2.committed / anticipated) * 100)}%` }} /></div>
+                <div className="row">
+                  <span>{pct(co2.committed / anticipated, 1)} {t("of anticipated portfolio total")}</span>
+                  <span>{compact(anticipated)} tCO₂e</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div className="hero-tiles">
+            <div className="hero-tile">
+              <div className="v"><CountUp value={progIds.size} format={(v) => num(v)} /></div>
+              <div className="l">{t("Programmes reporting")}</div>
+              <div className="d">{active} {t("active in")} {year}</div>
+            </div>
+            <div className="hero-tile">
+              <div className="v"><CountUp value={hectares} format={(v) => compact(v)} /></div>
+              <div className="l">{t("Hectares planted, restored or protected")}</div>
+              {yi > 0 && <div className="d">{signed(hectares - hectaresPrev, compact)} ha {t("vs previous year")}</div>}
+            </div>
+            <div className="hero-tile">
+              <div className="v"><CountUp value={m.headline.beneficiaries.value} format={(v) => compact(v)} /></div>
+              <div className="l">{t("Direct beneficiaries")}</div>
+              <div className="d" title={m.headline.beneficiaries.source}>{filtered ? t("Portfolio total — not filtered") : t("Portfolio total")}</div>
+            </div>
+            <div className="hero-tile">
+              <div className="v"><CountUp value={partners} format={(v) => num(v)} /></div>
+              <div className="l">{t("Implementing partners")}</div>
+              <div className="d">{countries} {t("Countries").toLowerCase()}</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="section" aria-labelledby="outcomes-h">
+        <div className="section-head">
+          <div>
+            <h2 id="outcomes-h">{t("Progress by outcome")}</h2>
+            <p className="muted small">{t("Average achievement of each outcome's indicators against final targets")}</p>
+          </div>
+        </div>
+        <div className="grid g-3">
+          {outcomes.map(({ o, aggs: oa, achievement, trend }) => (
+            <Link key={o.id} to={{ page: "outcome", id: o.id }} className="card link outcome-card" style={{ ["--c" as string]: outcomeVar(m, o.id) }}>
+              <div className="head">
+                <h3><i className="dot" style={{ background: outcomeVar(m, o.id) }} />{nameOf(o)}</h3>
+                <Sparkline values={trend} color={outcomeVar(m, o.id)} width={96} height={28} highlight={yi} />
+              </div>
+              <div className="big">{pct(achievement)}</div>
+              <div className="big-l">{t("Achievement")} · {oa.length} {t("indicators")}</div>
+              <Meter value={achievement} color={outcomeVar(m, o.id)} />
+              {oa.slice(0, 3).map((a) => (
+                <div className="ind" key={a.indicator.code}>
+                  <span title={nameOf(a.indicator)}>{nameOf(a.indicator)}</span>
+                  <b className="num">{withUnit(a.value, a.indicator.unit, lang, true)}</b>
+                </div>
+              ))}
+            </Link>
+          ))}
+        </div>
+      </section>
+
+      <section className="section grid g-12">
+        <ChartCard className="span-7" title={t("Where programmes work")} sub={mapLabel}
+          extra={
+            <div className="seg" role="group" aria-label="Map metric" style={{ marginRight: 6 }}>
+              {(["ha", "programmes", "co2"] as MapMetric[]).map((k) => (
+                <button key={k} aria-pressed={mapMetric === k} onClick={() => setMapMetric(k)}>
+                  {k === "ha" ? "ha" : k === "programmes" ? t("Programmes") : "CO₂"}
+                </button>
+              ))}
+            </div>
+          }
+          table={{
+            cols: [
+              { key: "c", label: t("Country"), value: (d: MapDatum) => d.label },
+              { key: "v", label: mapLabel, numeric: true, value: (d: MapDatum) => Math.round(d.value), render: (d: MapDatum) => d.display },
+            ],
+            rows: mapData,
+          }}>
+          {(ref) => (
+            <>
+              <AfricaMap data={mapData} metricLabel={mapLabel} height={430} chartRef={ref}
+                selected={filters.countries.map((id) => ix.countries.get(id)?.iso ?? "").filter(Boolean)}
+                onSelect={(iso) => {
+                  const id = isoToCountry.get(iso);
+                  if (!id) return;
+                  setFilters({ countries: filters.countries.includes(id) ? filters.countries.filter((c) => c !== id) : [id] });
+                }} />
+              <MapLegend label={mapLabel} min={mapMetric === "programmes" ? "1" : "0"}
+                max={mapData.length ? mapData.reduce((a, b) => (b.value > a.value ? b : a)).display : "–"} />
+            </>
+          )}
+        </ChartCard>
+        <TopProgrammes records={records} yi={yi} />
+      </section>
+
+      <section className="section grid g-12">
+        <HectaresOverTime records={records} />
+        <HectareTreemap records={records} yi={yi} />
+      </section>
+    </>
+  );
+}
+
+function TopProgrammes({ records, yi }: { records: DataRecord[]; yi: number }) {
+  const { m, ix, navigate } = useApp();
+  const rows = useMemo(() => {
+    const g = byKey(records.filter((r) => AREA_INDICATORS.includes(r.indicator)), (r) => r.programme);
+    return [...g.entries()].map(([id, rs]) => {
+      const byOutcome = new Map<string, number>();
+      rs.forEach((r) => byOutcome.set(ix.outcomeOf(r), (byOutcome.get(ix.outcomeOf(r)) ?? 0) + (valueAt(r.values, yi) ?? 0)));
+      return { id, name: ix.programmes.get(id)!.name, total: [...byOutcome.values()].reduce((a, b) => a + b, 0), byOutcome };
+    }).filter((r) => r.total > 0).sort((a, b) => b.total - a.total).slice(0, 10);
+  }, [records, yi, ix]);
+  const usedOutcomes = m.outcomes.filter((o) => rows.some((r) => r.byOutcome.get(o.id)));
+
+  return (
+    <ChartCard className="span-5" title={t("Top programmes")}
+      sub={`Top 10 · ${t("Hectares planted, restored or protected").toLowerCase()}`}
+      table={{
+        cols: [
+          { key: "p", label: t("Programme"), value: (r: (typeof rows)[number]) => r.name },
+          ...usedOutcomes.map((o) => ({ key: o.id, label: nameOf(o), numeric: true, value: (r: (typeof rows)[number]) => Math.round(r.byOutcome.get(o.id) ?? 0) })),
+          { key: "t", label: "Total (ha)", numeric: true, value: (r: (typeof rows)[number]) => Math.round(r.total) },
+        ] as Column<(typeof rows)[number]>[],
+        rows,
+      }}>
+      {(ref) => rows.length ? (
+        <>
+          {usedOutcomes.length > 1 && <LegendRow outcomes={usedOutcomes.map((o) => o.id)} />}
+          <Chart height={Math.max(220, rows.length * 36 + 30)} label="Top programmes by hectares" chartRef={ref} deps={[rows]}
+            onClick={(p) => { const r = rows[p.dataIndex]; if (r) navigate({ page: "programme", id: r.id }); }}
+            option={(tk) => ({
+              grid: { left: 8, right: 56, top: 4, bottom: 4, containLabel: true },
+              tooltip: {
+                ...tooltipBase(tk), trigger: "axis", axisPointer: { type: "shadow", shadowStyle: { color: tk.grid, opacity: 0.4 } },
+                formatter: (ps: { dataIndex: number }[]) => {
+                  const r = rows[ps[0].dataIndex];
+                  return tipTitle(r.name) + usedOutcomes.filter((o) => r.byOutcome.get(o.id))
+                    .map((o) => tipRow(outcomeHex(m, tk, o.id), `${num(r.byOutcome.get(o.id))} ha`, nameOf(o), "rect")).join("") +
+                    `<div style="margin-top:6px;opacity:.8">Total <b>${num(r.total)} ha</b></div>`;
+                },
+              },
+              xAxis: { type: "value", ...axisBase(tk), axisLabel: { ...axisBase(tk).axisLabel, formatter: (v: number) => compact(v) }, splitNumber: 3 },
+              yAxis: {
+                type: "category", inverse: true, data: rows.map((r) => r.name), ...axisBase(tk), splitLine: { show: false },
+                axisLabel: { ...axisBase(tk).axisLabel, color: tk.ink2, width: 150, overflow: "truncate" },
+              },
+              series: usedOutcomes.map((o, k) => ({
+                name: nameOf(o), type: "bar", stack: "ha", barMaxWidth: 18, cursor: "pointer",
+                itemStyle: {
+                  color: outcomeHex(m, tk, o.id), borderColor: tk.surface, borderWidth: 1,
+                  borderRadius: k === usedOutcomes.length - 1 ? [0, 4, 4, 0] : 0,
+                },
+                emphasis: { focus: "series" },
+                label: k === usedOutcomes.length - 1 ? {
+                  show: true, position: "right", color: tk.ink2, fontSize: 12,
+                  formatter: (p: { dataIndex: number }) => compact(rows[p.dataIndex].total),
+                } : undefined,
+                data: rows.map((r) => Math.round(r.byOutcome.get(o.id) ?? 0)),
+              })),
+            })} />
+        </>
+      ) : <div className="empty">{t("No data for the current filters")}</div>}
+    </ChartCard>
+  );
+}
+
+function LegendRow({ outcomes }: { outcomes: string[] }) {
+  const { m } = useApp();
+  return (
+    <div className="legend">
+      {m.outcomes.filter((o) => outcomes.includes(o.id)).map((o) => (
+        <span key={o.id}><i className="dot" style={{ background: outcomeVar(m, o.id) }} />{nameOf(o)}</span>
+      ))}
+    </div>
+  );
+}
+
+function HectaresOverTime({ records }: { records: DataRecord[] }) {
+  const { m, ix, filters } = useApp();
+  const years = m.meta.years;
+  const series = m.outcomes.map((o) => {
+    const rs = records.filter((r) => AREA_INDICATORS.includes(r.indicator) && ix.outcomeOf(r) === o.id);
+    return { o, values: years.map((_, i) => rs.reduce((s, r) => s + (valueAt(r.values, i) ?? 0), 0)) };
+  }).filter((s) => s.values.some((v) => v > 0));
+  const partial = m.meta.partialYears;
+
+  return (
+    <ChartCard className="span-7" title={t("Hectares over time")} sub={t("Cumulative hectares by outcome")}
+      table={{
+        cols: [
+          { key: "y", label: "Year", value: (r: { y: number; i: number }) => r.y },
+          ...series.map((s) => ({ key: s.o.id, label: nameOf(s.o), numeric: true, value: (r: { y: number; i: number }) => Math.round(s.values[r.i]) })),
+        ] as Column<{ y: number; i: number }>[],
+        rows: years.map((y, i) => ({ y, i })),
+      }}>
+      {(ref) => (
+        <>
+          <LegendRow outcomes={series.map((s) => s.o.id)} />
+          <Chart height={320} label="Cumulative hectares by outcome over time" chartRef={ref} deps={[series, filters.year]}
+            option={(tk) => ({
+              grid: { left: 8, right: 16, top: 16, bottom: 4, containLabel: true },
+              tooltip: {
+                ...tooltipBase(tk), trigger: "axis",
+                axisPointer: { type: "line", lineStyle: { color: tk.ink2, width: 1 } },
+                formatter: (ps: { dataIndex: number }[]) => {
+                  const i = ps[0].dataIndex;
+                  const total = series.reduce((s, x) => s + x.values[i], 0);
+                  return tipTitle(`${years[i]}${partial.includes(years[i]) ? ` · ${t("partial year")}` : ""}`) +
+                    `<div style="font-size:16px;font-weight:700;margin:2px 0 4px">${esc(num(total))} ha</div>` +
+                    [...series].reverse().map((s) => tipRow(outcomeHex(m, tk, s.o.id), `${num(s.values[i])} ha`, nameOf(s.o))).join("");
+                },
+              },
+              xAxis: { type: "category", boundaryGap: false, data: years.map(String), ...axisBase(tk), splitLine: { show: false } },
+              yAxis: { type: "value", ...axisBase(tk), axisLine: { show: false }, axisLabel: { ...axisBase(tk).axisLabel, formatter: (v: number) => compact(v) } },
+              series: series.map((s, k) => ({
+                name: nameOf(s.o), type: "line", stack: "total", smooth: 0.25, symbol: "circle", symbolSize: 8, showSymbol: false,
+                lineStyle: { width: 2, color: outcomeHex(m, tk, s.o.id) },
+                itemStyle: { color: outcomeHex(m, tk, s.o.id), borderColor: tk.surface, borderWidth: 2 },
+                areaStyle: { color: outcomeHex(m, tk, s.o.id), opacity: 0.16 },
+                emphasis: { focus: "series" },
+                data: s.values,
+                markLine: k === 0 ? {
+                  symbol: "none", silent: true, label: { show: false },
+                  lineStyle: { color: tk.ink2, width: 1, type: "solid" },
+                  data: [{ xAxis: String(filters.year) }],
+                } : undefined,
+                markArea: k === 0 && partial.length ? {
+                  silent: true, itemStyle: { color: tk.grid, opacity: 0.35 },
+                  label: { show: true, position: "insideTop", color: tk.muted, fontSize: 11, formatter: t("partial year") },
+                  data: [[{ xAxis: String(partial[0] - 1) }, { xAxis: String(partial[partial.length - 1]) }]],
+                } : undefined,
+              })),
+            })} />
+        </>
+      )}
+    </ChartCard>
+  );
+}
+
+function HectareTreemap({ records, yi }: { records: DataRecord[]; yi: number }) {
+  const { m, ix, navigate } = useApp();
+  const tree = useMemo(() => m.outcomes.map((o) => {
+    const inds = m.indicators.filter((i) => i.outcome === o.id && AREA_INDICATORS.includes(i.code)).map((i) => {
+      const g = byKey(records.filter((r) => r.indicator === i.code), (r) => r.programme);
+      const children = [...g.entries()].map(([pid, rs]) => ({
+        name: ix.programmes.get(pid)!.name, id: `${i.code}|${pid}`,
+        value: rs.reduce((s, r) => s + (valueAt(r.values, yi) ?? 0), 0),
+      })).filter((c) => c.value > 0);
+      return { name: nameOf(i), id: i.code, value: children.reduce((s, c) => s + c.value, 0), children };
+    }).filter((i) => i.value > 0);
+    return { name: nameOf(o), id: o.id, outcome: o.id, value: inds.reduce((s, i) => s + i.value, 0), children: inds };
+  }).filter((o) => o.value > 0), [m, ix, records, yi]);
+  const grand = tree.reduce((s, o) => s + o.value, 0) || 1;
+  const flat = tree.flatMap((o) => o.children.flatMap((i) => i.children.map((p) => ({ o: o.name, i: i.name, p: p.name, v: p.value }))));
+
+  return (
+    <ChartCard className="span-5" title={t("Where the hectares are")} sub={t("By outcome, indicator and programme")}
+      table={{
+        cols: [
+          { key: "o", label: "Outcome", value: (r: (typeof flat)[number]) => r.o },
+          { key: "i", label: t("Indicator"), value: (r: (typeof flat)[number]) => r.i },
+          { key: "p", label: t("Programme"), value: (r: (typeof flat)[number]) => r.p },
+          { key: "v", label: "ha", numeric: true, value: (r: (typeof flat)[number]) => Math.round(r.v) },
+        ] as Column<(typeof flat)[number]>[],
+        rows: flat,
+      }}>
+      {(ref) => tree.length ? (
+        <Chart height={360} label="Treemap of hectares by outcome, indicator and programme" chartRef={ref} deps={[tree]}
+          onClick={(p) => {
+            const id = (p.data as { id?: string })?.id ?? "";
+            if (id.includes("|")) navigate({ page: "programme", id: id.split("|")[1] });
+          }}
+          option={(tk) => ({
+            tooltip: {
+              ...tooltipBase(tk),
+              formatter: (p: { treePathInfo: { name: string }[]; value: number }) => {
+                const path = p.treePathInfo.slice(1).map((x) => x.name);
+                return tipTitle(path.slice(0, -1).join(" › ")) + `<b>${esc(path[path.length - 1])}</b><div style="font-size:15px;font-weight:700;margin-top:4px">${esc(num(p.value))} ha</div>`;
+              },
+            },
+            series: [{
+              type: "treemap", roam: false, nodeClick: "zoomToNode", width: "100%", height: "88%", top: 0,
+              breadcrumb: {
+                show: true, bottom: 0, left: 0, height: 22,
+                itemStyle: { color: tk.surface2, borderColor: tk.border, textStyle: { color: tk.ink2 } },
+                emphasis: { itemStyle: { color: tk.grid } },
+              },
+              // Tiles under ~2.5 % of the total stay unlabelled (tooltip + table carry them).
+              label: { show: true, fontSize: 12, fontWeight: 600, overflow: "truncate",
+                formatter: (p: { name: string; value: number }) => (p.value / grand >= 0.025 ? `${p.name}\n${compact(p.value)} ha` : "") },
+              upperLabel: { show: true, height: 22, fontWeight: 650, fontSize: 12,
+                formatter: (p: { name: string; value: number }) => (p.value / grand >= 0.04 ? p.name : "") },
+              itemStyle: { borderColor: tk.surface, borderWidth: 2, gapWidth: 2, borderRadius: 4 },
+              levels: [
+                { itemStyle: { borderWidth: 0, gapWidth: 3 }, upperLabel: { show: false } },
+                { itemStyle: { gapWidth: 2, borderColor: tk.surface } },
+                { itemStyle: { gapWidth: 2, borderColor: tk.surface, borderWidth: 1 } },
+              ],
+              data: tree.map((o) => {
+                const c = outcomeHex(m, tk, o.outcome);
+                const ink = textOn(c);
+                return { ...o, itemStyle: { color: c }, label: { color: ink }, upperLabel: { color: ink } };
+              }),
+            }],
+          })} />
+      ) : <div className="empty">{t("No data for the current filters")}</div>}
+    </ChartCard>
+  );
+}
+

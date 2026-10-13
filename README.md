@@ -1,0 +1,127 @@
+# CAFI Metrics Hub
+
+Interactive dashboard of results reported by CAFI-funded programmes across Central
+Africa, rebuilt from the Power BI report as code: version-controlled, tested, and
+republished automatically.
+
+```
+data/ProjectData.xlsx ──► pipeline (Python) ──► metrics.json + quality.json ──► dashboard (React + ECharts) ──► GitHub Pages
+        ▲                   validate · clean · CO₂                                  static site, no server
+   SharePoint (optional, daily)
+```
+
+## What's in the dashboard
+
+| Page | What it shows |
+|---|---|
+| **Overview** | Committed CO₂ against the portfolio target, headline tiles, progress per outcome, a map of Central Africa (hectares / programmes / CO₂ — click a country to filter), top programmes, hectares over time, and a treemap of where the hectares are |
+| **Outcomes** | Each indicator with result, target, achievement and year-on-year change; trajectory charts against target; programme ranking; every sub-indicator row with a status |
+| **Programmes** | Timeline of all programme periods; cards or table with average achievement, sparkline and on-track status; a detail page per programme |
+| **Climate impact** | Absorbed vs avoided emissions by indicator, realised vs committed over time, CO₂ by country, and the emission factors used |
+| **Data quality** | Every check run on the workbook, with the Excel row numbers to fix |
+| **Methodology** | How every number is calculated, plus the indicator catalogue |
+
+Everywhere:
+- **Filters:** year, with a ▶ button that plays through the years; country, partner and programme. Filters are kept in the URL, so any view can be shared as a link.
+- **Search:** press ⌘K / Ctrl K (or `/`) to jump to any programme, indicator or country.
+- **Every chart:** a table view, CSV download and PNG download.
+- **Display:** English / French, light / dark theme, works on mobile, keyboard-accessible, colour-blind-safe colours.
+
+## Updating the data
+
+**Option 1: commit the workbook.** Replace `data/ProjectData.xlsx` and push to `main` (or open a pull request). CI validates it, and the site republishes in about 2 minutes.
+
+**Option 2: let it pull from SharePoint daily.** Register an app in Entra ID with the Graph application permission `Sites.Selected`, granted on the CAFI site only. Then add these in the GitHub repo under Settings → Secrets and variables → Actions:
+
+| Kind | Name | Example |
+|---|---|---|
+| Secret | `AZURE_TENANT_ID` | `b3e5db5e-…` |
+| Secret | `AZURE_CLIENT_ID` | app id |
+| Secret | `AZURE_CLIENT_SECRET` | client secret |
+| Variable | `SHAREPOINT_SITE` | `undp.sharepoint.com:/sites/cafi` |
+| Variable | `SHAREPOINT_FILE` | `M&E/CAFI Metrics Hub/ProjectData.xlsx` |
+
+The **Publish dashboard** workflow then fetches the workbook every day at 05:17 UTC. You can also run it by hand from the Actions tab.
+
+### What the checks do
+
+`python -m pipeline.build` reads the `CumulResults` sheet and:
+
+- **Stops the build (errors):**
+  - missing columns;
+  - an indicator code or country that isn't in `config/indicators.yml`;
+  - text in a numeric cell;
+  - negative values.
+- **Fixes automatically and reports (warnings):**
+  - stray spaces;
+  - "Land Management" vs "Land management";
+  - partner spelling variants such as KfW / KFW.
+- **Reports only:**
+  - duplicate rows;
+  - a cumulative value going down;
+  - rows with no target;
+  - results above twice the target.
+
+All findings appear on the dashboard's **Data quality** page with Excel row numbers.
+
+## Changing labels, indicators or the carbon method
+
+| File | Controls |
+|---|---|
+| `config/indicators.yml` | Indicator names (EN/FR), outcome, unit; outcome order (= chart colour); countries |
+| `config/co2_factors.yml` | tCO₂e per unit per year and horizon for each indicator, with the derivation shown on the site |
+| `config/headline.yml` | Figures not in the workbook (beneficiaries, anticipated portfolio CO₂) |
+
+### Calculation rules
+
+- **Results are cumulative.** A year's value is the total reached so far; years are never added together. A missing year carries the last reported value forward.
+- **Achievement** = Σ results ÷ Σ targets, over rows that have a target.
+  - An outcome's achievement is the average of its indicators.
+  - The Power BI report added up per-row percentages instead, which understated progress. For example, it showed 3 % for clean cooking where the correct figure is 120 %.
+- **Units are never mixed.** Hectares, counts and km are kept apart.
+- **Status** compares achievement with the share of the programme period that has elapsed.
+- **CO₂:**
+  - *Committed* = result × factor × horizon.
+  - *Realised* = what is in place accrues one year of benefit each year.
+  - *Target* = final target × factor × the same horizon.
+
+### Changes from the Power BI report — please confirm
+
+1. CO₂ targets now use the same horizon as CO₂ results. Power BI used 4, 9 or 5 years for targets but 10 for results.
+2. Forest conservation (13) now counts towards CO₂. Power BI had no results formula for it, so it always showed 0.
+3. Clean cooking (05) and forest conservation (13) are counted as *avoided* emissions, not *absorbed*.
+4. Beneficiaries and anticipated CO₂ are still constants, now in `config/headline.yml`. They need a source.
+
+## Running locally
+
+```bash
+pip install -r requirements.txt
+python -m pipeline.build          # → web/public/data/*.json
+python -m pytest                  # pipeline tests
+
+cd web
+npm install
+npm run dev                       # http://localhost:5173
+npm test                          # aggregation-rule tests
+npm run build                     # → web/dist (static site)
+```
+
+## Publishing (one-time setup)
+
+1. In the GitHub repo, go to **Settings → Pages → Build and deployment → Source: GitHub Actions**.
+2. Merge to `main`. The **Publish dashboard** workflow builds and deploys to `https://<owner>.github.io/cafi_metrics_hub/`.
+
+GitHub Pages on a private repository needs a paid GitHub plan. You can also deploy the `web/dist` folder to any static host, such as Azure Static Web Apps, Netlify or SharePoint.
+
+## Project layout
+
+```
+config/            indicator catalogue, CO₂ factors, headline figures
+data/              ProjectData.xlsx (source workbook)
+pipeline/          build.py (validate + transform), quality.py, fetch_sharepoint.py
+tests/             pipeline tests (pytest)
+web/src/lib/       data model + aggregation rules (model.ts, tested), i18n, state/URL sync
+web/src/components charts, filters, command palette, tables
+web/src/pages/     Overview, Outcomes, Programmes, Programme detail, Climate, Data quality, Methodology
+.github/workflows/ ci.yml (checks on every push/PR), deploy.yml (publish to Pages)
+```
